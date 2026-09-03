@@ -1,0 +1,7 @@
+/config.ini
+/logs/*.log
+/logs/*.log.old
+/build/
+/bin/
+*.o
+*.d

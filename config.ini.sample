@@ -1,0 +1,43 @@
+; Copy this file to config.ini and fill in your values.
+; config.ini must never be committed (see .gitignore).
+;
+; WARNING (A02:2025 -- Security Misconfiguration):
+; Never use root with an empty password in production.
+; Create a dedicated MySQL user with the minimum required privileges:
+;   CREATE USER 'ctfparser'@'localhost' IDENTIFIED BY 'strong_password';
+;   GRANT SELECT, INSERT, UPDATE, DELETE ON ctftimeparser.* TO 'ctfparser'@'localhost';
+
+[db]
+host    = localhost
+port    = 3306
+name    = ctftimeparser
+user    = db_user
+pass    = db_password
+charset = utf8mb4
+
+[parser]
+; How many days ahead to fetch events
+days_ahead = 14
+; CTFTime API max results per request
+events_limit = 100
+; cURL timeout in seconds
+request_timeout = 10
+; Pause between per-event detail requests (seconds)
+sleep_between_requests = 1
+
+[telegram]
+; Bot token from @BotFather
+bot_token = YOUR_BOT_TOKEN
+; Supergroup chat ID (negative number, e.g. -1001234567890)
+; Send any message to @userinfobot or use getUpdates to find it
+chat_id = -1001234567890
+; Topic (thread) ID for the announcements topic
+; Forward any message from the topic to @JsonDumpBot to find it
+thread_id = 123
+; Pause between individual daily-update messages (seconds)
+; Telegram global limit is ~30 messages/sec; 2s is safe for a single bot
+sleep_between_messages = 2
+
+[logging]
+log_file           = logs/parser.log
+publisher_log_file = logs/publisher.log
