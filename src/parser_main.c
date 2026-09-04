@@ -106,7 +106,7 @@ int main(int argc, char **argv)
             } else {
                 log_msg(log_file, "info", "%zu new event(s) to process.", total);
 
-                size_t saved = 0, skipped = 0, unsafe = 0;
+                size_t saved = 0, skipped = 0, unsafe = 0, db_failed = 0;
 
                 for (size_t i = 0; i < total; i++) {
                     unsigned int event_id = pending[i];
@@ -144,7 +144,15 @@ int main(int argc, char **argv)
                         unsafe++;
                     }
 
-                    db_insert_event(db, &ev);
+                    if (!db_insert_event(db, &ev)) {
+                        log_msg(log_file, "error",
+                                "Event #%u: database insert failed (%s). Left in buffer for retry.",
+                                event_id, db_error(db));
+                        db_failed++;
+                        ctf_event_free(&ev);
+                        continue;
+                    }
+
                     db_delete_from_buffer(db, event_id);
                     saved++;
 
@@ -161,8 +169,9 @@ int main(int argc, char **argv)
 
                 free(pending);
 
-                log_msg(log_file, "info", "Done. Saved: %zu | Unsafe (stored): %zu | Skipped: %zu",
-                        saved, unsafe, skipped);
+                log_msg(log_file, "info",
+                        "Done. Saved: %zu | Unsafe (stored): %zu | Skipped: %zu | DB failed: %zu",
+                        saved, unsafe, skipped, db_failed);
             }
         }
 

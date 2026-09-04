@@ -84,6 +84,16 @@ int telegram_send_message(const telegram_config_t *cfg, const char *text)
             long retry_after = 5;
             json_get_int(params, "retry_after", &retry_after);
             json_free(response);
+            /* Clamp to a sane window before the signed->unsigned cast: a
+             * negative or absurdly large server-supplied value would
+             * otherwise become a multi-decade sleep() while this process
+             * holds its lock file (the same class of bug as a mistyped
+             * config sleep_* value -- see config.c's validate_and_clamp()). */
+            if (retry_after < 0) {
+                retry_after = 0;
+            } else if (retry_after > 300) {
+                retry_after = 300;
+            }
             sleep((unsigned int) (retry_after + 1));
             continue; /* honour the rate limit window, then retry once */
         }

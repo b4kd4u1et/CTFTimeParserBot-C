@@ -66,6 +66,13 @@ static int is_safe_string(const char *value)
     return 1;
 }
 
+/* Same as is_safe_string(), but treats a NULL value (allocation failure in
+ * sanitize_string_alloc()) as safe/empty instead of crashing on regexec(). */
+static int safe_or_empty(const char *value)
+{
+    return value ? is_safe_string(value) : 1;
+}
+
 /* ---- URL validation ---------------------------------------------------- */
 
 static int url_scheme_and_host(const char *value, char *scheme_out, size_t scheme_cap,
@@ -158,8 +165,19 @@ static int sanitize_url(const char *value, int allow_any_domain, char *out, size
         return 0;
     }
     for (size_t i = 0; i < len; i++) {
-        if (isspace((unsigned char) value[i])) {
+        unsigned char c = (unsigned char) value[i];
+        if (isspace(c)) {
             return 0; /* null-byte and whitespace tricks */
+        }
+        /* Defense in depth: a URL never legitimately needs a raw '<', '>',
+         * '"', or '\'' (they must be percent-encoded per RFC 3986), and
+         * this stored value is later embedded in an HTML href="..."
+         * attribute (formatter.c). Output-encoding there already
+         * neutralizes these characters, but rejecting them here means the
+         * safety of this field no longer depends solely on every future
+         * caller remembering to HTML-escape it before display. */
+        if (c == '<' || c == '>' || c == '"' || c == '\'') {
+            return 0;
         }
     }
 
@@ -214,17 +232,25 @@ int content_security_sanitize(const json_value_t *raw, unsigned int forced_id,
         return 0;
     }
 
-    int is_safe = 1;
-
     const char *raw_desc = json_get_string(raw, "description", "");
     const char *raw_loc  = json_get_string(raw, "location", "");
-    if (!is_safe_string(raw_title)) is_safe = 0;
-    if (!is_safe_string(raw_desc))  is_safe = 0;
-    if (!is_safe_string(raw_loc))   is_safe = 0;
 
     char *description = sanitize_string_alloc(raw_desc, DESC_MAX);
     char *format = sanitize_string_alloc(json_get_string(raw, "format", ""), FORMAT_MAX);
     char *location = sanitize_string_alloc(raw_loc, LOCATION_MAX);
+
+    /* Check both the raw value AND the tag-stripped/whitespace-collapsed
+     * stored value: strip_tags_alloc() removing an interleaved tag can
+     * reassemble a pattern that the raw text alone didn't match, e.g. raw
+     * "<div>{</div>{7*7}}" doesn't match \{\{.*\}\} but the stripped,
+     * stored/displayed string "{{7*7}}" does -- checking only the raw
+     * value let that kind of tag-splitting evade the heuristic entirely.
+     * A NULL sanitized value (allocation failure) is treated as safe/empty
+     * rather than dereferenced. */
+    int is_safe = 1;
+    if (!is_safe_string(raw_title) || !safe_or_empty(title))       is_safe = 0;
+    if (!is_safe_string(raw_desc)  || !safe_or_empty(description)) is_safe = 0;
+    if (!is_safe_string(raw_loc)   || !safe_or_empty(location))    is_safe = 0;
 
     const char *raw_url  = json_get_string(raw, "url", "");
     const char *raw_logo = json_get_string(raw, "logo", "");
@@ -263,6 +289,14 @@ int content_security_sanitize(const json_value_t *raw, unsigned int forced_id,
     int has_weight = json_get_number(raw, "weight", &weight);
     if (has_weight) {
         weight = round(weight * 100000.0) / 100000.0;
+        /* ctf_events.weight is DECIMAL(8,5): max magnitude 999.99999. A
+         * pathological/malformed API value outside that range would
+         * otherwise reach db_insert_event() and risk an out-of-range
+         * INSERT failure under strict SQL mode -- drop it instead of
+         * storing a value the column can't actually hold. */
+        if (weight < -999.99999 || weight > 999.99999) {
+            has_weight = 0;
+        }
     }
 
     int onsite = json_get_bool(raw, "onsite", 0);

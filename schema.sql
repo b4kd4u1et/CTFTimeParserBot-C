@@ -18,7 +18,10 @@ CREATE TABLE IF NOT EXISTS `ctf_events` (
     `weight`      DECIMAL(8,5)  DEFAULT NULL,
     `onsite`      TINYINT(1)    NOT NULL DEFAULT 0,
     `location`    VARCHAR(255)  DEFAULT NULL,
-    `description` TEXT          DEFAULT NULL,
+    -- MEDIUMTEXT, not TEXT: the app truncates description to 65535
+    -- *characters*, and on utf8mb4 that can take up to 4 bytes each
+    -- (262140 bytes) -- more than TEXT's 65535-byte capacity.
+    `description` MEDIUMTEXT    DEFAULT NULL,
     `logo_url`    VARCHAR(512)  DEFAULT NULL,
     `is_safe`     TINYINT(1)    NOT NULL DEFAULT 1,
     `posted_at`   DATETIME      DEFAULT NULL,

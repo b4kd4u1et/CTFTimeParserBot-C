@@ -18,20 +18,39 @@ void strbuf_init(strbuf_t *b)
     b->len = 0;
     if (b->data) {
         b->data[0] = '\0';
+    } else {
+        b->cap = 0; /* cap must never claim capacity a NULL buffer doesn't have */
     }
 }
 
-static void strbuf_reserve(strbuf_t *b, size_t extra)
+/* Ensures room for `extra` more bytes plus a NUL terminator. Returns 1 on
+ * success, 0 on failure (allocation failure, or a request so large that the
+ * required capacity would overflow size_t) -- callers must not write past
+ * b->cap when this returns 0. */
+static int strbuf_reserve(strbuf_t *b, size_t extra)
 {
-    if (b->len + extra + 1 <= b->cap) {
-        return;
+    if (extra > SIZE_MAX - b->len - 1) {
+        return 0; /* b->len + extra + 1 would overflow size_t */
+    }
+    size_t need = b->len + extra + 1;
+    if (need <= b->cap) {
+        return 1;
     }
     size_t newcap = b->cap ? b->cap : 64;
-    while (newcap < b->len + extra + 1) {
+    while (newcap < need) {
+        if (newcap > SIZE_MAX / 2) {
+            newcap = need;
+            break;
+        }
         newcap *= 2;
     }
-    b->data = realloc(b->data, newcap);
+    char *newdata = realloc(b->data, newcap);
+    if (!newdata) {
+        return 0;
+    }
+    b->data = newdata;
     b->cap = newcap;
+    return 1;
 }
 
 void strbuf_append(strbuf_t *b, const char *s)
@@ -40,7 +59,9 @@ void strbuf_append(strbuf_t *b, const char *s)
         return;
     }
     size_t slen = strlen(s);
-    strbuf_reserve(b, slen);
+    if (!strbuf_reserve(b, slen)) {
+        return; /* OOM/overflow: best-effort buffer, drop this append rather than corrupt memory */
+    }
     memcpy(b->data + b->len, s, slen);
     b->len += slen;
     b->data[b->len] = '\0';
@@ -58,7 +79,10 @@ void strbuf_append_fmt(strbuf_t *b, const char *fmt, ...)
         va_end(ap2);
         return;
     }
-    strbuf_reserve(b, (size_t) needed);
+    if (!strbuf_reserve(b, (size_t) needed)) {
+        va_end(ap2);
+        return;
+    }
     vsnprintf(b->data + b->len, (size_t) needed + 1, fmt, ap2);
     va_end(ap2);
     b->len += (size_t) needed;
@@ -348,6 +372,46 @@ char *json_escape_alloc(const char *s)
 
 /* ---- Network / SSRF helpers ------------------------------------------ */
 
+/* Detects hosts that "look like" an IP address encoded to dodge a literal
+ * dotted-quad/colon-hex check -- a decimal integer ("2130706433"), a 0x-
+ * prefixed hex literal ("0x7f000001"), an octal-looking or short-form
+ * dotted string ("017700000001", "127.1"). inet_pton() is intentionally
+ * strict and accepts none of these, but some HTTP clients/resolvers still
+ * normalize them to the literal address they encode, so treating "host is
+ * nothing but digits and dots, or 0x+hex" as suspicious closes that gap. A
+ * real hostname always contains at least one letter, so this has no false
+ * positives against legitimate DNS names. */
+static int host_looks_like_ip_obfuscation(const char *host)
+{
+    size_t len = strlen(host);
+    if (len == 0) {
+        return 0;
+    }
+
+    if (len > 2 && host[0] == '0' && (host[1] == 'x' || host[1] == 'X')) {
+        for (size_t i = 2; i < len; i++) {
+            if (!isxdigit((unsigned char) host[i])) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+
+    int has_digit = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char) host[i];
+        if (c >= '0' && c <= '9') {
+            has_digit = 1;
+            continue;
+        }
+        if (c == '.') {
+            continue;
+        }
+        return 0; /* contains a letter or other char: an ordinary hostname */
+    }
+    return has_digit;
+}
+
 int is_internal_host(const char *host)
 {
     if (!host || !*host) {
@@ -409,7 +473,7 @@ int is_internal_host(const char *host)
         if ((a6.s6_addr[0] & 0xFEu) == 0xFCu) { /* fc00::/7 unique-local */
             return 1;
         }
-        if (IN6_IS_ADDR_V4MAPPED(&a6)) {
+        if (IN6_IS_ADDR_V4MAPPED(&a6) || IN6_IS_ADDR_V4COMPAT(&a6)) {
             char v4[INET_ADDRSTRLEN];
             struct in_addr ia;
             memcpy(&ia.s_addr, &a6.s6_addr[12], 4);
@@ -419,10 +483,14 @@ int is_internal_host(const char *host)
         return 0;
     }
 
-    /* Not a literal IP address -- treat as an ordinary hostname. No DNS
-     * resolution is performed (a blocking lookup with no timeout could
-     * stall the cron process), matching the original's threat model. */
-    return 0;
+    /* Not a literal IP address recognized by inet_pton(). Reject anything
+     * that merely *looks like* an obfuscated IP literal (decimal/hex/octal/
+     * short-form) rather than treating it as an ordinary hostname -- see
+     * host_looks_like_ip_obfuscation(). Otherwise, treat it as a real
+     * hostname: no DNS resolution is performed (a blocking lookup with no
+     * timeout could stall the cron process), matching the original's
+     * threat model. */
+    return host_looks_like_ip_obfuscation(buf);
 }
 
 /* ---- Time helpers ------------------------------------------------- */
@@ -440,6 +508,16 @@ int parse_iso8601(const char *s, time_t *out)
         if (matched != 6) {
             return 0;
         }
+    }
+
+    /* Reject syntactically-parseable but out-of-range fields (month 13, day
+     * 45, ...) up front -- timegm() would otherwise silently *normalize*
+     * them into a different, "valid-looking" timestamp instead of failing,
+     * which could smuggle a garbage date past the caller's sanity check. 60
+     * is allowed for seconds to tolerate a leap second. */
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 ||
+        mi < 0 || mi > 59 || se < 0 || se > 60) {
+        return 0;
     }
 
     int tz_offset_sec = 0;

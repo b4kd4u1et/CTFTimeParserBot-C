@@ -60,6 +60,10 @@ int ctftime_fetch_event_ids(int timeout_sec, time_t start, time_t finish, int li
 
     size_t n = json_array_size(events);
     unsigned int *ids = n ? malloc(sizeof(unsigned int) * n) : NULL;
+    if (n && !ids) {
+        json_free(events);
+        return 0;
+    }
     size_t count = 0;
 
     for (size_t i = 0; i < n; i++) {

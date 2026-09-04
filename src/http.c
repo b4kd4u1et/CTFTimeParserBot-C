@@ -14,6 +14,12 @@ void http_global_cleanup(void)
     curl_global_cleanup();
 }
 
+/* Generous upper bound on a buffered response body: both ctftime.org's
+ * event JSON and Telegram's sendMessage replies are a few KB in practice.
+ * Without a cap, write_cb() would grow unboundedly on a huge or malformed
+ * response, risking memory exhaustion (see the audit's H1 finding). */
+#define MAX_RESPONSE_SIZE (8 * 1024 * 1024)
+
 struct write_ctx {
     char *data;
     size_t len;
@@ -24,6 +30,10 @@ static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
     struct write_ctx *ctx = userdata;
     size_t add = size * nmemb;
+
+    if (add > MAX_RESPONSE_SIZE || ctx->len > MAX_RESPONSE_SIZE - add) {
+        return 0; /* would exceed the response-size cap: abort the transfer */
+    }
 
     if (ctx->len + add + 1 > ctx->cap) {
         size_t newcap = ctx->cap ? ctx->cap * 2 : 4096;
@@ -66,6 +76,11 @@ static int do_request(const char *url, const char *json_body, int timeout_sec,
     curl_easy_setopt(ch, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(ch, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(ch, CURLOPT_SSL_VERIFYHOST, 2L);
+    /* Early-abort when Content-Length is known and already too large; the
+     * authoritative cap is enforced in write_cb() regardless (this option
+     * has no effect on a response sent without a known length, e.g.
+     * chunked transfer-encoding). */
+    curl_easy_setopt(ch, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t) MAX_RESPONSE_SIZE);
 
     if (json_body) {
         headers = curl_slist_append(headers, "Content-Type: application/json");

@@ -11,7 +11,13 @@ int lock_acquire(lockfile_t *lock, const char *path)
 {
     lock->fd = -1;
 
-    int fd = open(path, O_CREAT | O_RDWR, 0644);
+    /* O_NOFOLLOW: refuse to follow an existing symlink at `path`. Without
+     * it, a local attacker could pre-create `path` as a symlink to any
+     * file the service account can write (CWE-61); this open() would then
+     * silently open and later ftruncate() *that* file instead of a plain
+     * lock file. O_NOFOLLOW only affects an *existing* symlink -- O_CREAT
+     * still creates an ordinary new file when nothing is there yet. */
+    int fd = open(path, O_CREAT | O_RDWR | O_NOFOLLOW, 0644);
     if (fd < 0) {
         return -1;
     }
@@ -41,10 +47,21 @@ int lock_acquire(lockfile_t *lock, const char *path)
 
 void lock_release(lockfile_t *lock, const char *path)
 {
+    /* Deliberately does NOT unlink `path`. Removing the lock file here would
+     * reopen the classic flock+unlink TOCTOU race: a process that opened
+     * the (still-existing) file just before this unlink() keeps believing
+     * it holds "the" lock on that inode, while unlink() detaches the name
+     * from it -- a process arriving after the unlink() then open()s a
+     * brand-new inode at the same path and acquires an uncontended lock,
+     * so two processes end up each holding an exclusive lock on two
+     * different inodes that no longer share a path. Leaving the file in
+     * place means every acquire always flock()s the *same* inode, which
+     * sidesteps that whole class of confusion; the file is just an empty,
+     * harmless marker between runs. */
+    (void) path;
     if (lock->fd >= 0) {
         flock(lock->fd, LOCK_UN);
         close(lock->fd);
         lock->fd = -1;
-        unlink(path);
     }
 }

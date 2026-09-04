@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential libcurl4-openssl-dev libmariadb-dev valgrind
+
+      - name: Build (warnings are errors)
+        run: make WERROR=-Werror
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Run unit tests under valgrind
+        run: |
+          set -e
+          for t in build/tests/*; do
+            echo "== valgrind: $t =="
+            valgrind --error-exitcode=99 --leak-check=full --show-leak-kinds=definite,indirect "$t"
+          done
+
+      - name: Verify binary hardening (RELRO/PIE)
+        run: |
+          set -e
+          for bin in bin/parser bin/publisher; do
+            echo "== $bin =="
+            readelf -d "$bin" | grep -q BIND_NOW || { echo "missing full RELRO"; exit 1; }
+            readelf -h "$bin" | grep -q "Type:.*DYN" || { echo "not built as PIE"; exit 1; }
+          done

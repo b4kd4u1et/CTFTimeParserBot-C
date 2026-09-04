@@ -72,6 +72,7 @@ mysql -u ctfparser -p ctftimeparser < schema.sql
 
 ```bash
 cp config.ini.sample config.ini
+chmod 600 config.ini   # МҚ құпиясөзі мен бот токені ашық мәтінде сақталады
 ```
 
 `config.ini` файлын толтырыңыз (INI пішімі, PHP массивінің орнына):
@@ -90,10 +91,10 @@ thread_id = 42
 
 #### 6. Cron арқылы жоспарлау
 
-Екілік файлдар өз каталогынан іске қосылған кезде `config.ini` файлын ағымдағы каталогтан іздейді, сондықтан жол көрсету ұсынылады:
+Екілік файлдар өз каталогынан іске қосылған кезде `config.ini` файлын ағымдағы каталогтан іздейді, сондықтан жол көрсету ұсынылады. **root емес, арнайы қызметтік пайдаланушы астында іске қосыңыз** (MySQL пайдаланушысы үшін де осылай ұсынылғандай) — lock-файл `/tmp` ішінде жатыр, сондықтан root-тан іске қосу локалды symlink-шабуылдардың ықтимал әсерін ұлғайтады:
 
 ```
-# CTFTime-дан оқиғаларды әр 6 сағат сайын жинау
+# CTFTime-дан оқиғаларды әр 6 сағат сайын жинау (мысалы, crontab -u ctfparserbot -e)
 0 */6 * * * /path/to/CTFTimeParserBot-C/bin/parser /path/to/CTFTimeParserBot-C/config.ini
 
 # Telegram-ға күн сайын 07:00-де жариялау
@@ -226,6 +227,7 @@ mysql -u ctfparser -p ctftimeparser < schema.sql
 
 ```bash
 cp config.ini.sample config.ini
+chmod 600 config.ini   # пароль БД и токен бота хранятся в открытом виде
 ```
 
 Заполните `config.ini` (формат INI вместо PHP-массива):
@@ -244,10 +246,10 @@ thread_id = 42
 
 #### 6. Запуск через cron
 
-Бинарники ищут `config.ini` в текущем рабочем каталоге, поэтому в cron лучше передавать путь явно:
+Бинарники ищут `config.ini` в текущем рабочем каталоге, поэтому в cron лучше передавать путь явно. **Запускайте под выделенным непривилегированным пользователем, а не root** (по той же логике, что и рекомендация о пользователе MySQL) — lock-файл лежит в `/tmp`, и запуск от root увеличивает потенциальный ущерб от локальной symlink-атаки:
 
 ```
-# Собирать события с CTFTime каждые 6 часов
+# Собирать события с CTFTime каждые 6 часов (например, crontab -u ctfparserbot -e)
 0 */6 * * * /path/to/CTFTimeParserBot-C/bin/parser /path/to/CTFTimeParserBot-C/config.ini
 
 # Публиковать в Telegram каждый день в 07:00
@@ -381,7 +383,7 @@ publisher (cron, каждый день в 07:00)
 | `weight` | DECIMAL(8,5) | Рейтинговый вес CTFTime |
 | `onsite` | TINYINT(1) | 1 = очное мероприятие |
 | `location` | VARCHAR(255) | Город/страна для очных событий |
-| `description` | TEXT | Описание события |
+| `description` | MEDIUMTEXT | Описание события |
 | `logo_url` | VARCHAR(512) | URL логотипа |
 | `is_safe` | TINYINT(1) | 0 = помечено проверкой безопасности |
 | `posted_at` | DATETIME | NULL = ещё не опубликовано в Telegram |
@@ -480,8 +482,11 @@ sudo apt-get install libmariadb-dev   # или libmysqlclient-dev
 - **Daily updates** — individual full-detail posts for new events
 - No scripting-language runtime — pure C11, libcurl, MySQL/MariaDB client
 - Atomic lock files (`open`+`flock`) prevent overlapping cron runs
-- File-based logging with automatic rotation at 5 MB
+- File-based logging with automatic rotation at 5 MB, control characters escaped to prevent log injection
+- Symlink-safe locking (`O_NOFOLLOW`) and no unlink-based lock-file TOCTOU window
 - Verified leak-free under `valgrind` (both binaries, every branch)
+- Explicit compiler/linker hardening (`-D_FORTIFY_SOURCE=2`, stack protector, PIE, full RELRO) and a `-Werror` CI build
+- `make test` runs an automated unit test suite (JSON parser, UTF-8/SSRF helpers, sanitization, formatter, locking, logging) covering the adversarial cases from the project's own security audit
 
 ### Requirements
 
@@ -535,6 +540,7 @@ mysql -u ctfparser -p ctftimeparser < schema.sql
 
 ```bash
 cp config.ini.sample config.ini
+chmod 600 config.ini   # holds the DB password and bot token in plain text
 ```
 
 Fill in `config.ini` (an INI file, replacing PHP's config array):
@@ -567,10 +573,10 @@ publisher_log_file = logs/publisher.log
 
 #### 6. Schedule via cron
 
-Both binaries look for `config.ini` in the current working directory, so pass an explicit path in cron:
+Both binaries look for `config.ini` in the current working directory, so pass an explicit path in cron. **Run under a dedicated, unprivileged service account rather than root** (the same reasoning as the MySQL user recommendation above) — the lock file lives under `/tmp`, and running as root widens the potential impact of a local symlink attack on that path:
 
 ```
-# Fetch new events from CTFTime every 6 hours
+# Fetch new events from CTFTime every 6 hours (e.g. crontab -u ctfparserbot -e)
 0 */6 * * * /path/to/CTFTimeParserBot-C/bin/parser /path/to/CTFTimeParserBot-C/config.ini
 
 # Publish to Telegram every day at 07:00
@@ -601,10 +607,27 @@ CTFTimeParserBot-C/
 │   ├── telegram_bot.c           # Telegram Bot API client
 │   ├── parser_main.c            # `parser` binary's main()
 │   └── publisher_main.c         # `publisher` binary's main()
+├── tests/                      # `make test` -- unit tests (see below)
+├── .github/workflows/ci.yml    # build + test + valgrind on every push
 └── logs/
     ├── parser.log              # Parser log (auto-created, rotates at 5 MB)
     └── publisher.log           # Publisher log (auto-created, rotates at 5 MB)
 ```
+
+### Testing
+
+```bash
+make test          # build and run every tests/test_*.c against the real .c sources
+```
+
+Each `tests/test_*.c` is a standalone program (see `tests/test_helpers.h` for the
+tiny `CHECK()`/`CHECK_STR_EQ()` harness) covering the modules most likely to have a
+subtle bug — the hand-written JSON parser, UTF-8 and SSRF helpers, content
+sanitization, and the Telegram message formatter — including the specific
+adversarial inputs (SSRF bypass strings, XSS/attribute-breakout payloads,
+tag-splitting evasion, malformed JSON, a symlinked lock path) found during this
+project's own security audit. CI (`.github/workflows/ci.yml`) builds with
+`-Werror`, runs `make test`, and re-runs every test binary under `valgrind`.
 
 ### Overall Algorithm
 
@@ -704,7 +727,7 @@ Identical to the original PHP version — see `schema.sql`.
 | `weight` | DECIMAL(8,5) | CTFTime rating weight |
 | `onsite` | TINYINT(1) | 1 = on-site event |
 | `location` | VARCHAR(255) | City/country for on-site events |
-| `description` | TEXT | Event description |
+| `description` | MEDIUMTEXT | Event description |
 | `logo_url` | VARCHAR(512) | Event logo URL |
 | `is_safe` | TINYINT(1) | 0 = flagged by security checks |
 | `posted_at` | DATETIME | NULL = not yet published to Telegram |

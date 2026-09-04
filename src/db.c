@@ -31,6 +31,10 @@ db_t *db_connect(const db_config_t *cfg)
     }
 
     db_t *db = malloc(sizeof(*db));
+    if (!db) {
+        mysql_close(conn);
+        return NULL;
+    }
     db->conn = conn;
     return db;
 }
@@ -59,6 +63,9 @@ int db_insert_buffer(db_t *db, const unsigned int *ids, size_t count)
 
     size_t qcap = 64 + count * 4;
     char *query = malloc(qcap);
+    if (!query) {
+        return 0;
+    }
     size_t off = (size_t) snprintf(query, qcap, "INSERT IGNORE INTO `parser_buffer` (`event_id`) VALUES ");
     for (size_t i = 0; i < count; i++) {
         off += (size_t) snprintf(query + off, qcap - off, "%s(?)", i > 0 ? "," : "");
@@ -77,6 +84,10 @@ int db_insert_buffer(db_t *db, const unsigned int *ids, size_t count)
     free(query);
 
     MYSQL_BIND *binds = calloc(count, sizeof(MYSQL_BIND));
+    if (!binds) {
+        mysql_stmt_close(stmt);
+        return 0;
+    }
     for (size_t i = 0; i < count; i++) {
         binds[i].buffer_type = MYSQL_TYPE_LONG;
         binds[i].buffer = (void *) &ids[i];
@@ -113,6 +124,10 @@ int db_get_buffer_ids(db_t *db, unsigned int **ids_out, size_t *count_out)
 
     my_ulonglong n = mysql_num_rows(res);
     unsigned int *ids = n ? malloc(sizeof(unsigned int) * (size_t) n) : NULL;
+    if (n && !ids) {
+        mysql_free_result(res);
+        return 0;
+    }
     size_t i = 0;
     MYSQL_ROW row;
     while ((row = mysql_fetch_row(res)) != NULL) {
@@ -311,6 +326,10 @@ static int fetch_events(MYSQL *conn, const char *sql, ctf_event_t **events_out, 
 
     my_ulonglong n = mysql_num_rows(res);
     ctf_event_t *events = n ? malloc(sizeof(ctf_event_t) * (size_t) n) : NULL;
+    if (n && !events) {
+        mysql_free_result(res);
+        return 0;
+    }
     size_t i = 0;
     MYSQL_ROW row;
     while ((row = mysql_fetch_row(res)) != NULL) {

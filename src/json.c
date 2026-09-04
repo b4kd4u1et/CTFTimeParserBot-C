@@ -17,6 +17,7 @@ typedef struct {
     char *data;
     size_t len;
     size_t cap;
+    int failed; /* set once any allocation in this buffer's lifetime fails */
 } strbuf_t;
 
 static void sb_init(strbuf_t *b)
@@ -24,22 +25,29 @@ static void sb_init(strbuf_t *b)
     b->cap = 16;
     b->data = malloc(b->cap);
     b->len = 0;
+    b->failed = 0;
     if (b->data) {
         b->data[0] = '\0';
+    } else {
+        b->cap = 0;
+        b->failed = 1;
     }
 }
 
 static void sb_push(strbuf_t *b, char c)
 {
-    if (!b->data) {
+    if (b->failed) {
         return;
     }
     if (b->len + 2 > b->cap) {
-        b->cap *= 2;
-        b->data = realloc(b->data, b->cap);
-        if (!b->data) {
+        size_t newcap = b->cap ? b->cap * 2 : 16;
+        char *newdata = realloc(b->data, newcap);
+        if (!newdata) {
+            b->failed = 1;
             return;
         }
+        b->data = newdata;
+        b->cap = newcap;
     }
     b->data[b->len++] = c;
     b->data[b->len] = '\0';
@@ -201,7 +209,12 @@ static char *parse_string(parser_t *p)
         }
     }
 
-    return b.data ? b.data : strdup("");
+    if (b.failed) {
+        p->error = 1;
+        free(b.data);
+        return NULL;
+    }
+    return b.data;
 }
 
 static json_value_t *parse_number(parser_t *p)
@@ -244,9 +257,11 @@ static json_value_t *parse_number(parser_t *p)
     buf[numlen] = '\0';
 
     json_value_t *v = new_value(JSON_NUMBER);
-    if (v) {
-        v->u.number = strtod(buf, NULL);
+    if (!v) {
+        p->error = 1;
+        return NULL;
     }
+    v->u.number = strtod(buf, NULL);
     return v;
 }
 
@@ -271,9 +286,20 @@ static json_value_t *parse_array(parser_t *p)
     }
 
     json_value_t *v = new_value(JSON_ARRAY);
+    if (!v) {
+        p->error = 1;
+        p->depth--;
+        return NULL;
+    }
     size_t cap = 4;
     v->u.array.items = malloc(sizeof(json_value_t *) * cap);
     v->u.array.count = 0;
+    if (!v->u.array.items) {
+        p->error = 1;
+        p->depth--;
+        json_free(v);
+        return NULL;
+    }
 
     skip_ws(p);
     if (peek(p) == ']') {
@@ -291,8 +317,17 @@ static json_value_t *parse_array(parser_t *p)
             return NULL;
         }
         if (v->u.array.count == cap) {
-            cap *= 2;
-            v->u.array.items = realloc(v->u.array.items, sizeof(json_value_t *) * cap);
+            size_t newcap = cap * 2;
+            json_value_t **newitems = realloc(v->u.array.items, sizeof(json_value_t *) * newcap);
+            if (!newitems) {
+                json_free(item);
+                p->error = 1;
+                p->depth--;
+                json_free(v);
+                return NULL;
+            }
+            v->u.array.items = newitems;
+            cap = newcap;
         }
         v->u.array.items[v->u.array.count++] = item;
 
@@ -327,10 +362,21 @@ static json_value_t *parse_object(parser_t *p)
     }
 
     json_value_t *v = new_value(JSON_OBJECT);
+    if (!v) {
+        p->error = 1;
+        p->depth--;
+        return NULL;
+    }
     size_t cap = 4;
     v->u.object.keys = malloc(sizeof(char *) * cap);
     v->u.object.values = malloc(sizeof(json_value_t *) * cap);
     v->u.object.count = 0;
+    if (!v->u.object.keys || !v->u.object.values) {
+        p->error = 1;
+        p->depth--;
+        json_free(v);
+        return NULL;
+    }
 
     skip_ws(p);
     if (peek(p) == '}') {
@@ -375,9 +421,25 @@ static json_value_t *parse_object(parser_t *p)
         }
 
         if (v->u.object.count == cap) {
-            cap *= 2;
-            v->u.object.keys = realloc(v->u.object.keys, sizeof(char *) * cap);
-            v->u.object.values = realloc(v->u.object.values, sizeof(json_value_t *) * cap);
+            size_t newcap = cap * 2;
+            char **newkeys = realloc(v->u.object.keys, sizeof(char *) * newcap);
+            if (newkeys) {
+                v->u.object.keys = newkeys;
+            }
+            json_value_t **newvalues = newkeys ? realloc(v->u.object.values, sizeof(json_value_t *) * newcap) : NULL;
+            if (!newkeys || !newvalues) {
+                if (newvalues) {
+                    v->u.object.values = newvalues;
+                }
+                free(key);
+                json_free(val);
+                p->error = 1;
+                p->depth--;
+                json_free(v);
+                return NULL;
+            }
+            v->u.object.values = newvalues;
+            cap = newcap;
         }
         v->u.object.keys[v->u.object.count] = key;
         v->u.object.values[v->u.object.count] = val;
@@ -417,12 +479,21 @@ static json_value_t *parse_value(parser_t *p)
             return NULL;
         }
         json_value_t *v = new_value(JSON_STRING);
+        if (!v) {
+            free(s);
+            p->error = 1;
+            return NULL;
+        }
         v->u.string = s;
         return v;
     }
     if (c == 't') {
         if (match_lit(p, "true")) {
             json_value_t *v = new_value(JSON_BOOL);
+            if (!v) {
+                p->error = 1;
+                return NULL;
+            }
             v->u.boolean = 1;
             return v;
         }
@@ -432,6 +503,10 @@ static json_value_t *parse_value(parser_t *p)
     if (c == 'f') {
         if (match_lit(p, "false")) {
             json_value_t *v = new_value(JSON_BOOL);
+            if (!v) {
+                p->error = 1;
+                return NULL;
+            }
             v->u.boolean = 0;
             return v;
         }
@@ -440,7 +515,11 @@ static json_value_t *parse_value(parser_t *p)
     }
     if (c == 'n') {
         if (match_lit(p, "null")) {
-            return new_value(JSON_NULL);
+            json_value_t *v = new_value(JSON_NULL);
+            if (!v) {
+                p->error = 1;
+            }
+            return v;
         }
         p->error = 1;
         return NULL;

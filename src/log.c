@@ -22,6 +22,32 @@ static void rotate_if_needed(const char *log_file)
     }
 }
 
+/* Replaces every C0 control character (including \n, \r, ESC) and DEL with a
+ * visible "\xHH" escape so a value that ends up in a log message can never
+ * forge a fake "[timestamp] [LEVEL] ..." line or smuggle a raw terminal
+ * escape sequence to whoever later tails/cats the log file (CWE-117 log
+ * injection). Regular bytes, including multi-byte UTF-8 (always >= 0x80),
+ * are copied through unchanged. */
+static void escape_control_chars(const char *in, char *out, size_t out_size)
+{
+    size_t oi = 0;
+    for (size_t i = 0; in[i] != '\0'; i++) {
+        unsigned char c = (unsigned char) in[i];
+        if (c < 0x20 || c == 0x7F) {
+            if (oi + 5 >= out_size) {
+                break;
+            }
+            oi += (size_t) snprintf(out + oi, out_size - oi, "\\x%02x", c);
+        } else {
+            if (oi + 2 >= out_size) {
+                break;
+            }
+            out[oi++] = (char) c;
+        }
+    }
+    out[oi] = '\0';
+}
+
 void log_msg(const char *log_file, const char *level, const char *fmt, ...)
 {
     rotate_if_needed(log_file);
@@ -55,8 +81,11 @@ void log_msg(const char *log_file, const char *level, const char *fmt, ...)
     vsnprintf(message, sizeof(message), fmt, ap);
     va_end(ap);
 
-    char line[4224];
-    int n = snprintf(line, sizeof(line), "[%s] [%s] %s\n", ts, upper_level, message);
+    char safe_message[sizeof(message) * 4];
+    escape_control_chars(message, safe_message, sizeof(safe_message));
+
+    char line[sizeof(safe_message) + 128];
+    int n = snprintf(line, sizeof(line), "[%s] [%s] %s\n", ts, upper_level, safe_message);
     if (n > 0) {
         size_t total = (size_t) n < sizeof(line) ? (size_t) n : sizeof(line) - 1;
         size_t written = 0;

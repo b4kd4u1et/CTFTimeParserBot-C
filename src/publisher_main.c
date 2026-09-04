@@ -118,9 +118,22 @@ int main(int argc, char **argv)
                     char *text = formatter_event(ev);
 
                     if (telegram_send_message(tcfg, text)) {
-                        db_mark_as_posted(db, ev->id);
-                        log_msg(log_file, "info", "Published event #%u: \"%s\"", ev->id, ev->title);
-                        sent++;
+                        if (db_mark_as_posted(db, ev->id)) {
+                            log_msg(log_file, "info", "Published event #%u: \"%s\"", ev->id, ev->title);
+                            sent++;
+                        } else {
+                            /* Sent successfully, but the DB write that records that fact
+                             * failed: posted_at stays NULL, so this event will be re-sent
+                             * to Telegram on the next run unless an operator intervenes.
+                             * Loud on purpose -- this is the one failure mode that silently
+                             * produces a duplicate notification rather than a missed one. */
+                            log_msg(log_file, "error",
+                                    "Event #%u (\"%s\") was sent to Telegram but marking it as "
+                                    "posted failed (%s) -- it WILL be re-sent next run unless "
+                                    "posted_at is set manually.",
+                                    ev->id, ev->title, db_error(db));
+                            sent++;
+                        }
                     } else {
                         log_msg(log_file, "warn",
                                 "Failed to send event #%u (\"%s\") -- will retry on next run.",
@@ -130,7 +143,7 @@ int main(int argc, char **argv)
 
                     free(text);
 
-                    if (i < total - 1) {
+                    if (tcfg->sleep_between_messages > 0 && i < total - 1) {
                         sleep((unsigned int) tcfg->sleep_between_messages);
                     }
                 }

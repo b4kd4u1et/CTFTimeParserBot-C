@@ -265,6 +265,10 @@ char **formatter_digest(const ctf_event_t *events, size_t count, int days, size_
 
     /* Build one compact "• <link>\n  📅 meta | meta | ..." block per event. */
     char **items = malloc(sizeof(char *) * count);
+    if (!items) {
+        strbuf_free(&header);
+        return NULL;
+    }
     for (size_t i = 0; i < count; i++) {
         const ctf_event_t *ev = &events[i];
 
@@ -317,6 +321,14 @@ char **formatter_digest(const ctf_event_t *events, size_t count, int days, size_
 
     /* Pack items into <=4096-char Telegram message parts. */
     char **parts = malloc(sizeof(char *) * (count + 1));
+    if (!parts) {
+        strbuf_free(&header);
+        for (size_t i = 0; i < count; i++) {
+            free(items[i]);
+        }
+        free(items);
+        return NULL;
+    }
     size_t parts_n = 0;
 
     char *current_header = strdup(header.data);
