@@ -75,6 +75,39 @@ static void test_sqli_pattern_flagged_unsafe(void)
     ctf_event_free(&ev);
 }
 
+static void test_sqli_heuristic_does_not_flag_ordinary_prose(void)
+{
+    /* Regression test: "select ... from" and "drop ... table" with an
+     * unbounded gap used to match completely ordinary English sentences,
+     * silently marking normal events unsafe and starving the publisher. */
+    ctf_event_t ev1;
+    sanitize_from_json(
+        "{\"id\":1,\"title\":\"Fine\",\"description\":"
+        "\"Select your favorite category from the list below and start hacking!\"}",
+        1, &ev1);
+    CHECK(ev1.is_safe == 1, "ordinary 'select ... from' prose must not be flagged unsafe");
+    ctf_event_free(&ev1);
+
+    ctf_event_t ev2;
+    sanitize_from_json(
+        "{\"id\":1,\"title\":\"Fine\",\"description\":"
+        "\"Drop by our booth and check out the merchandise table.\"}",
+        1, &ev2);
+    CHECK(ev2.is_safe == 1, "ordinary 'drop ... table' prose must not be flagged unsafe");
+    ctf_event_free(&ev2);
+}
+
+static void test_sqli_heuristic_still_catches_union_select(void)
+{
+    ctf_event_t ev;
+    sanitize_from_json(
+        "{\"id\":1,\"title\":\"Fine\",\"description\":"
+        "\"' UNION SELECT password FROM users--\"}",
+        1, &ev);
+    CHECK(ev.is_safe == 0, "an adjacent UNION SELECT must still be flagged unsafe");
+    ctf_event_free(&ev);
+}
+
 static void test_ssrf_urls_rejected(void)
 {
     ctf_event_t ev1;
@@ -157,6 +190,8 @@ int main(void)
     test_xss_and_ssti_flagged_unsafe();
     test_tag_split_ssti_evasion_is_caught();
     test_sqli_pattern_flagged_unsafe();
+    test_sqli_heuristic_does_not_flag_ordinary_prose();
+    test_sqli_heuristic_still_catches_union_select();
     test_ssrf_urls_rejected();
     test_url_metacharacters_rejected();
     test_ctftime_domain_allowlist();

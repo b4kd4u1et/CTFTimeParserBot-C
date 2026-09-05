@@ -38,8 +38,16 @@ static void compile_patterns(void)
         regcomp(&g_ssti_re[i], ssti_patterns[i], REG_EXTENDED);
     }
 
+    /* Requires the keywords adjacent (only whitespace/"all" between), not
+     * merely present anywhere in the same string: the previous
+     * "\bselect\b.*\bfrom\b" (unbounded gap) matched ordinary English
+     * prose like "select a track from the menu" or "drop by our table",
+     * silently marking normal event descriptions as unsafe and starving
+     * the publisher of anything to send (see the false-positive
+     * investigation below). Real prepared statements in db.c remain the
+     * actual SQLi defence; this is a supplementary content-safety flag. */
     regcomp(&g_sqli_re[0],
-            "(\\bunion\\b.*\\bselect\\b|\\bselect\\b.*\\bfrom\\b|\\bdrop\\b.*\\btable\\b)",
+            "(\\bunion\\b[[:space:]]+(all[[:space:]]+)?\\bselect\\b|\\bdrop\\b[[:space:]]+\\btable\\b)",
             REG_EXTENDED | REG_ICASE);
     regcomp(&g_sqli_re[1], "--[[:space:]]*$", REG_EXTENDED);
     regcomp(&g_sqli_re[2],
